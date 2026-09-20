@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maramellstrom.token-usage-report</string>
+
+    <!-- Sources credentials from ~/.token-usage.env, then runs through a
+         login shell so it picks up the same PATH (node/npx, python3) your
+         terminal uses. Edit the path below if this repo isn't cloned to
+         ~/token-usage. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>source ~/.token-usage.env 2&gt;/dev/null; cd ~/token-usage &amp;&amp; python3 scripts/email_report.py &gt;&gt; ~/token-usage-report.log 2&gt;&amp;1</string>
+    </array>
+
+    <!-- 7:30 PM every night -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>19</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- launchd-level diagnostics, separate from the report's own log --
+         useful if the job fails before the script even runs. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/token-usage-report.launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/token-usage-report.launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
