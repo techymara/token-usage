@@ -151,6 +151,11 @@ def _row(cell_style: str, right_style: str, label: str, value) -> str:
     return f'<tr><td style="{cell_style}">{html.escape(str(label))}</td><td style="{cell_style}{right_style}">{money(value)}</td></tr>'
 
 
+def _total_row(cell_style: str, right_style: str, label: str, value) -> str:
+    bold_cell = cell_style + "font-weight:600;border-top:2px solid #ccc;border-bottom:none;"
+    return f'<tr><td style="{bold_cell}">{html.escape(str(label))}</td><td style="{bold_cell}{right_style}">{money(value)}</td></tr>'
+
+
 def build_html(r, from_addr: str, next_report: dt.date) -> str:
     cell = "padding:6px 12px;border-bottom:1px solid #e5e5e5;text-align:left;"
     header_cell = cell + "font-weight:600;background:#f5f5f5;"
@@ -171,11 +176,16 @@ def build_html(r, from_addr: str, next_report: dt.date) -> str:
             f"through {r['last_month_start'].strftime('%Y-%m')})",
             r["three_months_cost"],
         ),
+        _total_row(
+            cell, right, "Total (sum of above)",
+            r["today_cost"] + r["last_month_cost"] + r["three_months_cost"],
+        ),
     ])
 
     daily_rows = "".join(
         _row(cell, right, period, cost) for period, cost in r["daily"]
     ) or f'<tr><td style="{cell}" colspan="2">No usage recorded in this window.</td></tr>'
+    daily_rows += _total_row(cell, right, "Total", r["daily_total"])
 
     skip_tomorrow = _mailto(from_addr, f"{CMD_TAG}: SKIP-TOMORROW")
     skip_week = _mailto(from_addr, f"{CMD_TAG}: SKIP-7-DAYS")
@@ -225,10 +235,12 @@ def build_text(r, next_report: dt.date) -> str:
         f"Last calendar month ({r['last_month_start'].strftime('%Y-%m')}): {money(r['last_month_cost'])}",
         f"Last 3 calendar months ({r['three_months_start'].strftime('%Y-%m')} "
         f"through {r['last_month_start'].strftime('%Y-%m')}): {money(r['three_months_cost'])}",
+        f"Total (sum of above): {money(r['today_cost'] + r['last_month_cost'] + r['three_months_cost'])}",
         f"\nDaily, last {len(r['daily'])} days:",
     ]
     for period, cost in r["daily"]:
         lines.append(f"  {period}: {money(cost)}")
+    lines.append(f"  Total: {money(r['daily_total'])}")
     lines.append(f"\nNext report: {next_report.isoformat()}")
     lines.append(f"To change that, reply with subject '{CMD_TAG}: SKIP-TOMORROW', "
                  f"'{CMD_TAG}: SKIP-7-DAYS', or '{CMD_TAG}: NEXT-ON YYYY-MM-DD'.")
