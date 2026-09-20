@@ -48,15 +48,19 @@ are kept, since ccusage reads directly from Claude Code's own logs.
 ## Scheduling (nightly email, macOS)
 
 `scripts/email_report.py` emails a clean HTML version of the report (a
-summary table + a daily breakdown table, with the headline numbers in the
-subject line) instead of printing to the terminal. It reuses the same
-ccusage-backed logic as `report_cost.py` via `scripts/ccusage_report.py`.
+summary table + a daily breakdown table, each ending in a bolded Total
+row, with the headline numbers in the subject line) instead of printing
+to the terminal. It reuses the same ccusage-backed logic as
+`report_cost.py` via `scripts/ccusage_report.py`.
 
 It also supports skip/reschedule controls sent right from the email: each
 one includes buttons to skip tomorrow's report, skip the next 7 days, or
 set an exact date for the next report. Clicking a button opens a pre-filled
 reply; the next scheduled run checks for that reply (over IMAP, unread
 mail only) before sending, and skips itself if asked to.
+
+Confirmed working end-to-end (Gmail SMTP send, IMAP reply polling, and the
+`launchd` nightly job) as of 2026-09-20.
 
 ### One-time setup
 
