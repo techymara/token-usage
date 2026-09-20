@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report Anthropic API cost for this org via the Admin Cost Report API.
+"""Report Claude Code token usage cost from local session logs via ccusage.
 
 Prints:
   - Last 24 hours   (approximated as "today, UTC, to date" -- see note below)
@@ -7,78 +7,30 @@ Prints:
   - Last 3 calendar months
   - To date, daily basis (a day-by-day table going back --lookback-days)
 
-Requires an Admin API key (sk-ant-admin...) in ANTHROPIC_ADMIN_KEY (or
-ANTHROPIC_API_KEY). Regular workspace API keys cannot call this endpoint.
+Uses ccusage (https://github.com/ryoppippi/ccusage), a local-first CLI that
+reads Claude Code's own session logs (~/.claude/projects/**/*.jsonl) and
+requires no Anthropic API key of any kind. Run via `npx`, which fetches it
+on first use (needs Node.js and network access once; cached after that).
 
-Note on "last 24 hours": the Cost Report API only buckets by full UTC
-calendar day (bucket_width=1d), so a true trailing-24-hour window isn't
-available. This script reports the current UTC day's cost-to-date instead,
-which undercounts if it's early in the UTC day. For a precise trailing
-24-hour token count (not cost), use the Usage Report API's 1h buckets.
+Because this reads local logs, the numbers only cover usage from whichever
+machine this script runs on -- run it wherever your actual Claude Code
+sessions happen, not from an unrelated environment.
+
+Note on "last 24 hours": ccusage buckets by full UTC calendar day, so a
+true trailing-24-hour window isn't available. This script reports the
+current UTC day's cost-to-date instead, which undercounts if it's early
+in the UTC day.
 """
 import argparse
 import datetime as dt
-import os
+import json
+import subprocess
 import sys
 from decimal import Decimal, ROUND_HALF_UP
 
-import requests
 
-API_URL = "https://api.anthropic.com/v1/organizations/cost_report"
-ANTHROPIC_VERSION = "2023-06-01"
-CENTS_PER_UNIT = Decimal(100)
-
-
-def get_api_key() -> str:
-    key = os.environ.get("ANTHROPIC_ADMIN_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        sys.exit(
-            "Missing ANTHROPIC_ADMIN_KEY (or ANTHROPIC_API_KEY) environment variable.\n"
-            "Create an Admin API key in the Claude Console "
-            "(Settings > Admin keys) and set it as a secret on this "
-            "environment, then re-run."
-        )
-    return key
-
-
-def fmt(ts: dt.datetime) -> str:
-    return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def fetch_cost_buckets(starting_at: dt.datetime, ending_at: dt.datetime, api_key: str):
-    """Fetch all daily cost buckets in [starting_at, ending_at), paging as needed."""
-    buckets = []
-    page = None
-    for _ in range(200):  # safety cap: 200 pages * 31 days/page ~ 17 years
-        params = {
-            "starting_at": fmt(starting_at),
-            "ending_at": fmt(ending_at),
-            "bucket_width": "1d",
-            "limit": 31,
-        }
-        if page:
-            params["page"] = page
-        resp = requests.get(
-            API_URL,
-            params=params,
-            headers={"anthropic-version": ANTHROPIC_VERSION, "x-api-key": api_key},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        buckets.extend(body["data"])
-        if not body.get("has_more"):
-            break
-        page = body["next_page"]
-    return buckets
-
-
-def bucket_total_usd(bucket: dict) -> Decimal:
-    return sum((Decimal(r["amount"]) for r in bucket["results"]), Decimal(0)) / CENTS_PER_UNIT
-
-
-def money(amount: Decimal) -> str:
-    return f"${amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
+def money(amount) -> str:
+    return f"${Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}"
 
 
 def shift_months(first_of_month: dt.date, delta: int) -> dt.date:
@@ -89,73 +41,83 @@ def shift_months(first_of_month: dt.date, delta: int) -> dt.date:
     return first_of_month.replace(year=year, month=month, day=1)
 
 
-def as_utc_midnight(d: dt.date) -> dt.datetime:
-    return dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc)
+def run_ccusage(since: dt.date, until: dt.date) -> dict:
+    """Run `ccusage daily --json` over [since, until] (both inclusive, UTC)."""
+    proc = subprocess.run(
+        [
+            "npx", "--yes", "ccusage@latest", "daily", "--json",
+            "--timezone", "UTC",
+            "--since", since.isoformat(),
+            "--until", until.isoformat(),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        sys.exit(f"ccusage failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        sys.exit(f"Could not parse ccusage output as JSON:\n{proc.stdout}\n{proc.stderr}")
 
 
-def build_report(api_key: str, lookback_days: int) -> str:
+def total_cost(report: dict) -> Decimal:
+    return Decimal(str(report.get("totals", {}).get("totalCost", 0)))
+
+
+def build_report(lookback_days: int) -> str:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     today = now.date()
-    today_start = as_utc_midnight(today)
     first_of_this_month = today.replace(day=1)
 
     lines = []
-    lines.append(f"Token usage cost report - generated {fmt(now)}")
+    lines.append(f"Token usage cost report - generated {now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    lines.append("(source: local Claude Code session logs via ccusage - run this on the machine whose usage you want)")
     lines.append("=" * 60)
 
     # Last 24 hours (approximated as today-UTC-to-date; see module docstring).
-    # ending_at must be tomorrow's midnight, not "now": the API only returns
-    # buckets whose end is <= ending_at, so passing "now" (which is before
-    # today's bucket officially "ends") would exclude today's data entirely.
-    today_buckets = fetch_cost_buckets(
-        today_start, today_start + dt.timedelta(days=1), api_key
-    )
-    today_total = sum((bucket_total_usd(b) for b in today_buckets), Decimal(0))
+    today_report = run_ccusage(today, today)
     lines.append(
         f"\nLast 24 hours (today, UTC, {today.isoformat()} 00:00 -> now): "
-        f"{money(today_total)}"
+        f"{money(total_cost(today_report))}"
     )
     lines.append(
-        "  (approximation: Cost API only buckets by full UTC day; this is "
+        "  (approximation: ccusage only buckets by full UTC day; this is "
         "today-so-far, not a rolling 24h window)"
     )
 
     # Last calendar month
     last_month_start = shift_months(first_of_this_month, -1)
-    lm_buckets = fetch_cost_buckets(
-        as_utc_midnight(last_month_start), as_utc_midnight(first_of_this_month), api_key
-    )
-    last_month_total = sum((bucket_total_usd(b) for b in lm_buckets), Decimal(0))
+    last_month_end = first_of_this_month - dt.timedelta(days=1)
+    lm_report = run_ccusage(last_month_start, last_month_end)
     lines.append(
         f"\nLast calendar month ({last_month_start.strftime('%Y-%m')}): "
-        f"{money(last_month_total)}"
+        f"{money(total_cost(lm_report))}"
     )
 
     # Last 3 calendar months (the 3 full months before the current one)
     three_months_start = shift_months(first_of_this_month, -3)
-    tm_buckets = fetch_cost_buckets(
-        as_utc_midnight(three_months_start), as_utc_midnight(first_of_this_month), api_key
-    )
-    three_month_total = sum((bucket_total_usd(b) for b in tm_buckets), Decimal(0))
+    tm_report = run_ccusage(three_months_start, last_month_end)
     lines.append(
         f"\nLast 3 calendar months ({three_months_start.strftime('%Y-%m')} "
-        f"through {shift_months(first_of_this_month, -1).strftime('%Y-%m')}): "
-        f"{money(three_month_total)}"
+        f"through {last_month_start.strftime('%Y-%m')}): "
+        f"{money(total_cost(tm_report))}"
     )
 
     # To date, daily basis
     lookback_start = today - dt.timedelta(days=lookback_days)
-    all_buckets = fetch_cost_buckets(as_utc_midnight(lookback_start), today_start, api_key)
+    yesterday = today - dt.timedelta(days=1)
+    daily_report = run_ccusage(lookback_start, yesterday)
     lines.append(
         f"\nTo date, daily basis (last {lookback_days} completed UTC days, "
-        f"{lookback_start.isoformat()} through {(today - dt.timedelta(days=1)).isoformat()}):"
+        f"{lookback_start.isoformat()} through {yesterday.isoformat()}):"
     )
     running_total = Decimal(0)
-    for bucket in all_buckets:
-        day = bucket["starting_at"][:10]
-        day_total = bucket_total_usd(bucket)
-        running_total += day_total
-        lines.append(f"  {day}: {money(day_total)}")
+    for day in daily_report.get("daily", []):
+        day_cost = Decimal(str(day.get("totalCost", 0)))
+        running_total += day_cost
+        lines.append(f"  {day['period']}: {money(day_cost)}")
     lines.append(f"  {'-' * 20}")
     lines.append(f"  Total: {money(running_total)}")
 
@@ -172,8 +134,7 @@ def main():
     )
     args = parser.parse_args()
 
-    api_key = get_api_key()
-    print(build_report(api_key, args.lookback_days))
+    print(build_report(args.lookback_days))
 
 
 if __name__ == "__main__":
