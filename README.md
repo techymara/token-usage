@@ -1,6 +1,6 @@
 # token-usage
 
-Scheduled task: review my token usage and tell me the cost for each from the last 24 hours, last calendar month, last calendar 3 months, and to date on a daily basis.
+Local Claude Code cost reports (24h / month / 3 months / daily) — no API key needed.
 
 ## How this works
 
